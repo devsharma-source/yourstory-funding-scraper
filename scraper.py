@@ -33,17 +33,119 @@ def extract_funding_amount(title, excerpt=""):
     return None
 
 
-def extract_company_name(title):
+DESCRIPTOR_PREFIXES = re.compile(
+    r"^(?:"
+    r"[\w]+-based|AI-powered|tech-enabled|"
+    r"(?:tech|fintech|healthtech|agritech|edtech|SaaS|B2B|B2C|D2C|EV|AI|IoT|"
+    r"deeptech|cleantech|medtech|proptech|insurtech|legaltech|biotech|neobank(?:ing)?|"
+    r"crypto|blockchain|drone|logistics|e-?commerce|social commerce|"
+    r"housing finance|digital lending|digital health|"
+    r"cloud kitchen|food delivery|quick commerce|"
+    r"electric vehicle|electric mobility|"
+    r"venture capital|private equity|"
+    r"home decor|personal care|pet care|beauty|fashion|gaming|"
+    r"HR|HRtech|recruitment|staffing|"
+    r"travel|mobility|automotive|aerospace|defence|"
+    r"supply chain|procurement|marketing|advertising|"
+    r"cybersecurity|data analytics|"
+    r"(?:K-?12|ed-?tech|online (?:education|learning))"
+    r")"
+    r"(?:\s+\w+)*"  # optional extra words between sector and entity type
+    r"\s+(?:startup|firm|company|platform|lender|player|unicorn|soonicorn|"
+    r"major|giant|leader|provider|maker|brand|chain|venture|"
+    r"aggregator|marketplace|enterprise|solution|solutions)"
+    r")\s+",
+    re.IGNORECASE,
+)
+
+# Tags to skip when looking for company names in tags
+SKIP_TAGS = {
+    "just in", "funding", "funding news", "startup", "startups",
+    "weekly funding roundup", "indian startup funding",
+    "artificiai intelligence", "artificial intelligence", "ai",
+    "series a", "series b", "series c", "series d", "series e",
+    "seed funding", "pre-seed", "debt funding",
+    "venture capital", "private equity",
+}
+
+
+def _clean_company_name(name):
+    """Strip descriptive prefixes/suffixes from an extracted company name."""
+    name = name.strip()
+    # Remove leading descriptors like "Tech startup", "Fintech firm"
+    name = DESCRIPTOR_PREFIXES.sub("", name)
+    # Also handle simpler forms: "startup X", "platform X"
+    name = re.sub(
+        r"^(?:startup|firm|company|platform|lender)\s+",
+        "", name, flags=re.IGNORECASE,
+    )
+    # Remove trailing descriptors like "'s EV bus platform"
+    name = re.sub(r"['\u2019]s\s+.*$", "", name)
+    return name.strip()
+
+
+def _company_from_tags(tags):
+    """Try to find a company name from tags (first non-generic tag)."""
+    if not tags:
+        return None
+    for tag in tags:
+        if not isinstance(tag, dict) or "name" not in tag:
+            continue
+        t = tag["name"].strip()
+        if t.lower() in SKIP_TAGS:
+            continue
+        # Skip tags that look like categories/sectors (all lowercase, very generic)
+        if re.match(r"^[a-z\s-]+$", t) and len(t.split()) <= 2:
+            continue
+        # Good candidate: proper-cased, looks like a name
+        if 2 <= len(t) <= 80:
+            return t
+    return None
+
+
+def extract_company_name(title, excerpt="", tags=None):
     clean = re.sub(r"^\[.*?\]\s*", "", title)
+    # Pattern 1: "CompanyName raises/secures/bags ..."
     for pat in [
         r"^(.+?)\s+(?:raises?|secures?|gets?|bags?|closes?|receives?|lands?|nabs?|grabs?|clinches?|acquires?)\b",
         r"^(.+?)\s+(?:funding|investment|round)\b",
     ]:
         m = re.search(pat, clean, re.IGNORECASE)
         if m:
-            name = m.group(1).strip()
+            name = _clean_company_name(m.group(1))
             if 2 <= len(name) <= 100:
                 return name
+    # Pattern 2: "Investor invests/leads/backs $X in CompanyName"
+    m = re.search(
+        r"(?:invests?|injects?|infuses?|commits?|pumps?|leads?|backs?)\s+.{3,30}?\s+in(?:to)?\s+(.+?)(?:\s+to\b|\s*$)",
+        clean, re.IGNORECASE,
+    )
+    if m:
+        name = _clean_company_name(m.group(1).rstrip("."))
+        if name.lower() in ("mid-market companies", "indian startups", "startups"):
+            name = None
+        if name and 2 <= len(name) <= 80:
+            return name
+    # Pattern 3: "Investor doubles down on CompanyName"
+    m = re.search(r"doubles down on\s+(.+?)(?:,|\s*$)", clean, re.IGNORECASE)
+    if m:
+        name = _clean_company_name(m.group(1))
+        if 2 <= len(name) <= 80:
+            return name
+    # Pattern 4: Try the same patterns on the excerpt
+    if excerpt:
+        for pat in [
+            r"(\b[A-Z][\w]*(?:\s+[A-Z][\w]*)*)\s+(?:has\s+)?(?:raised?|secured?|closed?|received?)\b",
+        ]:
+            m = re.search(pat, excerpt)
+            if m:
+                name = _clean_company_name(m.group(1))
+                if 2 <= len(name) <= 80:
+                    return name
+    # Pattern 5: Fallback to tags — first non-generic tag is often the company
+    tag_name = _company_from_tags(tags)
+    if tag_name:
+        return tag_name
     return None
 
 
@@ -68,7 +170,7 @@ def normalize(raw):
         "tags": tags or None,
         "time_to_read": md.get("timeToRead"),
         "funding_amount": extract_funding_amount(title, excerpt),
-        "company_name": extract_company_name(title),
+        "company_name": extract_company_name(title, excerpt, md.get("tags", [])),
     }
 
 
